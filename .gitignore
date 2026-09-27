@@ -1,0 +1,38 @@
+# Android Build Outputs & Caches
+out/
+.repo/
+.ccache/
+*.a
+*.so
+*.o
+*.img
+*.zip
+
+# Proprietary Blobs & Firmware
+vendor/
+vendor_blobs/
+*.bin
+*.elf
+
+# Keys, Credentials & Secrets
+*.pem
+*.pk8
+*.key
+*.p12
+*.keystore
+id_rsa*
+id_ed25519*
+secrets.*
+env.local
+.env
+
+# IDE & Editor Temporary Files
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# Miscellaneous / Logs
+*.log
+tmp/
