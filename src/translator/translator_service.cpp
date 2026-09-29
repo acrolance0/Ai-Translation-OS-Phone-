@@ -9,6 +9,7 @@
 
 #include "AudioRingBuffer.h"
 #include "MockStreamingAsrEngine.h"
+#include "MockIncrementalTranslator.h"
 
 // Define a 2-second buffer for 16kHz mono 16-bit audio
 constexpr size_t RING_BUFFER_CAPACITY_FRAMES = 16000 * 2;
@@ -45,17 +46,41 @@ aaudio_data_callback_result_t dataCallback(
     return AAUDIO_CALLBACK_RESULT_CONTINUE;
 }
 
+// Helper to get current timestamp
+uint64_t GetCurrentTimeMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::system_clock::now().time_since_epoch())
+        .count();
+}
+
 // Background thread that continuously reads from the ring buffer and feeds the ASR engine
 void AsrWorkerThread() {
     LOG(INFO) << "ASR Worker Thread started.";
 
-    // Initialize the engine
+    // Initialize the ASR engine
     std::unique_ptr<IStreamingAsrEngine> asr_engine = std::make_unique<MockStreamingAsrEngine>();
     asr_engine->Initialize("/vendor/etc/models/asr/sherpa-onnx-zipformer");
+
+    // Initialize the Translation engine
+    std::unique_ptr<IIncrementalTranslator> translator = std::make_unique<MockIncrementalTranslator>();
+    TranslationConfig trans_config{"/vendor/etc/models/translate/nllb-200-qint8", "en", "es"};
+    translator->Initialize(trans_config);
+
+    // Setup the translation event callback
+    translator->SetEventCallback([](const TranslationEvent& event) {
+        if (event.status == TranslationStatus::PROVISIONAL) {
+            LOG(INFO) << "[Translate UI - PROV]: " << event.translated_text;
+        } else if (event.status == TranslationStatus::REVOKED) {
+            LOG(INFO) << "[Translate UI - REVOKED]: (Clear previous)";
+        } else if (event.status == TranslationStatus::COMMITTED) {
+            LOG(INFO) << "[Translate TTS - COMMITTED]: " << event.translated_text;
+        }
+    });
 
     std::vector<int16_t> local_buffer(1600); // 100ms chunks
 
     std::string last_partial = "";
+    uint64_t current_utterance_id = 1;
 
     while (keep_asr_running) {
         size_t available = audio_buffer.AvailableData();
@@ -71,6 +96,10 @@ void AsrWorkerThread() {
                 std::string current_partial = asr_engine->GetPartialHypothesis();
                 if (current_partial != last_partial) {
                     LOG(INFO) << "[ASR Partial]: " << current_partial;
+
+                    // Push to translation stage
+                    translator->PushPartialSource(current_utterance_id, current_partial, GetCurrentTimeMs());
+
                     last_partial = current_partial;
                 }
 
@@ -78,8 +107,12 @@ void AsrWorkerThread() {
                 if (asr_engine->IsEndpointDetected()) {
                     std::string final_text = asr_engine->GetFinalHypothesis();
                     LOG(INFO) << "[ASR Final]: " << final_text;
-                    LOG(INFO) << "--- Passing to Translation Stage ---";
+
+                    // Push final text to translation stage
+                    translator->PushCommittedSource(current_utterance_id, final_text, GetCurrentTimeMs());
+
                     last_partial = ""; // Reset
+                    current_utterance_id++;
                 }
             }
         } else {
