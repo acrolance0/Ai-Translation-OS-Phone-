@@ -1,0 +1,5 @@
+service translator_service /vendor/bin/translator_service
+    class hal
+    user system
+    group system audio bluetooth
+    seclabel u:r:translator_service:s0
