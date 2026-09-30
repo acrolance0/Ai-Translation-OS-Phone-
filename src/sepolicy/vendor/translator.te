@@ -1,0 +1,18 @@
+# Domain for translator_service
+type translator_service, domain;
+type translator_service_exec, exec_type, vendor_file_type, file_type;
+
+# Start from init
+init_daemon_domain(translator_service)
+
+# Allow minimal logging
+allow translator_service logd:unix_stream_socket connectto;
+allow translator_service logdw_socket:sock_file write;
+allow translator_service vendor_toolbox_exec:file execute_no_trans;
+
+# Allow audio capture via audioserver/AAudio
+allow translator_service audioserver_service:service_manager find;
+allow translator_service audioserver:binder { call transfer };
+allow translator_service audioserver:fd use;
+allow translator_service audio_device:dir search;
+allow translator_service audio_device:chr_file { read write open ioctl };
