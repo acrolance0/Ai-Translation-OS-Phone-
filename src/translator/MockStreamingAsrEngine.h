@@ -21,17 +21,24 @@ public:
 
     std::string GetPartialHypothesis() override {
         // Simulate incremental word output based on how much audio we've processed
-        size_t seconds_processed = total_samples_processed_ / 16000;
+        // We simulate a long sentence with self-repair to test incremental logic
+        size_t frames = total_samples_processed_ / 1600; // 100ms chunks
 
-        if (seconds_processed < 2) return "hello";
-        if (seconds_processed < 4) return "hello world";
-        if (seconds_processed < 6) return "hello world this is";
-        return "hello world this is a streaming test";
+        if (frames < 10) return "we";
+        if (frames < 20) return "we are";
+        if (frames < 30) return "we are building";
+        if (frames < 40) return "we are building a system";
+        // Self correction simulation
+        if (frames < 50) return "we are building an offline system";
+        if (frames < 60) return "we are building an offline system for the";
+        if (frames < 70) return "we are building an offline system for the OnePlus";
+        return "we are building an offline system for the OnePlus 12";
     }
 
     bool IsEndpointDetected() override {
-        // Simulate an endpoint after 8 seconds of audio
-        return (total_samples_processed_ >= (8 * 16000));
+        // Simulate an endpoint after 80 chunks (8 seconds) of audio
+        size_t frames = total_samples_processed_ / 1600;
+        return (frames >= 80);
     }
 
     std::string GetFinalHypothesis() override {

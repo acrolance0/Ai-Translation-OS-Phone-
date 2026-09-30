@@ -12,6 +12,7 @@
 #include "MockIncrementalTranslator.h"
 #include "TtsChunkScheduler.h"
 #include "MockStreamingTtsEngine.h"
+#include "DiagnosticLatencyTracker.h"
 
 // Input: 16kHz mono 16-bit audio
 constexpr size_t INPUT_RING_BUFFER_CAPACITY = 16000 * 2;
@@ -54,6 +55,9 @@ aaudio_data_callback_result_t inputDataCallback(
     return AAUDIO_CALLBACK_RESULT_CONTINUE;
 }
 
+// Used to pass utterance IDs from the worker thread to the output callback
+std::atomic<uint64_t> current_output_utterance_id{1};
+
 // AAudio Output callback for TTS playback (Bluetooth/Speaker)
 aaudio_data_callback_result_t outputDataCallback(
         AAudioStream *stream,
@@ -70,7 +74,21 @@ aaudio_data_callback_result_t outputDataCallback(
     }
 
     // Pull from our TTS Chunk Scheduler
+    size_t available_before = tts_scheduler.AvailableData();
     tts_scheduler.PullAudio(static_cast<int16_t*>(audioData), numFrames);
+    size_t available_after = tts_scheduler.AvailableData();
+
+    uint64_t active_utterance = current_output_utterance_id.load(std::memory_order_relaxed);
+
+    // If we just pulled the first chunk of a new synthesis cycle, log the BT latency milestone
+    if (available_before > 0 && available_before >= numFrames) {
+        DiagnosticLatencyTracker::GetInstance().RecordFirstBtOutput(active_utterance);
+    }
+
+    // If we just drained the queue, record the end of output
+    if (available_before > 0 && available_after == 0) {
+        DiagnosticLatencyTracker::GetInstance().RecordEndOfOutput(active_utterance);
+    }
 
     return AAUDIO_CALLBACK_RESULT_CONTINUE;
 }
@@ -107,11 +125,13 @@ void AsrWorkerThread() {
         } else if (event.status == TranslationStatus::REVOKED) {
             LOG(INFO) << "[Translate UI - REVOKED]: (Clear previous)";
         } else if (event.status == TranslationStatus::COMMITTED) {
+            DiagnosticLatencyTracker::GetInstance().RecordFirstTranslationChunk(event.utterance_id);
             LOG(INFO) << "[Translate TTS - COMMITTED]: " << event.translated_text;
 
             // Synthesize audio and push to scheduler
             std::vector<int16_t> audio_chunk;
             if (tts_engine->SynthesizeChunk(event.translated_text, audio_chunk)) {
+                DiagnosticLatencyTracker::GetInstance().RecordFirstTtsSynthesis(event.utterance_id);
                 if (!tts_scheduler.PushAudio(audio_chunk)) {
                     LOG(ERROR) << "TTS Scheduler buffer full! Dropping generated audio.";
                 }
@@ -123,6 +143,8 @@ void AsrWorkerThread() {
 
     std::string last_partial = "";
     uint64_t current_utterance_id = 1;
+    bool is_speaking = false;
+    bool summary_pending = false;
 
     while (keep_asr_running) {
         size_t available = audio_buffer.AvailableData();
@@ -131,12 +153,18 @@ void AsrWorkerThread() {
             size_t frames_read = audio_buffer.Read(local_buffer.data(), frames_to_read);
 
             if (frames_read > 0) {
+                if (!is_speaking) {
+                    DiagnosticLatencyTracker::GetInstance().RecordSpeechOnset(current_utterance_id);
+                    is_speaking = true;
+                }
+
                 // 1. Feed incremental audio
                 asr_engine->AcceptAudio(local_buffer.data(), frames_read);
 
                 // 2. Get incremental text
                 std::string current_partial = asr_engine->GetPartialHypothesis();
-                if (current_partial != last_partial) {
+                if (current_partial != last_partial && !current_partial.empty()) {
+                    DiagnosticLatencyTracker::GetInstance().RecordFirstAsrPartial(current_utterance_id);
                     LOG(INFO) << "[ASR Partial]: " << current_partial;
 
                     // Push to translation stage
@@ -147,6 +175,7 @@ void AsrWorkerThread() {
 
                 // 3. Check for endpoint (sentence boundary)
                 if (asr_engine->IsEndpointDetected()) {
+                    DiagnosticLatencyTracker::GetInstance().RecordEndOfSource(current_utterance_id);
                     std::string final_text = asr_engine->GetFinalHypothesis();
                     LOG(INFO) << "[ASR Final]: " << final_text;
 
@@ -154,12 +183,23 @@ void AsrWorkerThread() {
                     translator->PushCommittedSource(current_utterance_id, final_text, GetCurrentTimeMs());
 
                     last_partial = ""; // Reset
-                    current_utterance_id++;
+                    summary_pending = true;
+                    is_speaking = false;
                 }
             }
         } else {
             // No data, sleep briefly to avoid burning CPU
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+
+        // Print summary only after the output audio queue has been drained
+        if (summary_pending && tts_scheduler.AvailableData() == 0) {
+            // Slight delay to ensure the BT callback logged its timestamp
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            DiagnosticLatencyTracker::GetInstance().PrintSummary(current_utterance_id);
+            current_utterance_id++;
+            current_output_utterance_id.store(current_utterance_id, std::memory_order_relaxed);
+            summary_pending = false;
         }
     }
 }

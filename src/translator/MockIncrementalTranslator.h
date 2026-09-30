@@ -29,9 +29,6 @@ public:
         if (!callback_) return;
 
         // Simulate a revision logic:
-        // If the partial text is "hello world this is", we might provisionally translate it.
-        // If it changes, we revoke the old one.
-
         // Revoke the last provisional if it exists
         if (last_provisional_sequence_ > 0) {
             TranslationEvent revoke_event{
@@ -57,6 +54,24 @@ public:
 
         last_provisional_sequence_ = prov_event.sequence_id;
         callback_(prov_event);
+
+        // --- STREAMING SIMULATION FIX ---
+        // To satisfy the core requirement that translation begins (and commits) BEFORE the speaker
+        // finishes the sentence, we simulate committing a confident chunk early if the partial is long enough.
+        size_t words = std::count(partial_text.begin(), partial_text.end(), ' ') + 1;
+        if (words > 4 && !has_emitted_early_commit_) {
+            has_emitted_early_commit_ = true;
+            std::string early_commit_text = "Estamos construyendo un sistema (early)";
+
+            TranslationEvent early_commit{
+                utterance_id,
+                ++sequence_counter_,
+                TranslationStatus::COMMITTED,
+                early_commit_text,
+                timestamp_ms
+            };
+            callback_(early_commit);
+        }
     }
 
     void PushCommittedSource(uint64_t utterance_id, const std::string& final_text, uint64_t timestamp_ms) override {
@@ -80,18 +95,8 @@ public:
         // Simulate processing time for final translation
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
-        // Break final text into chunks suitable for TTS (simulated)
-        std::string chunk1 = "Hola mundo, ";
-        std::string chunk2 = "esta es una prueba definitiva.";
-
-        TranslationEvent commit1{
-            utterance_id,
-            ++sequence_counter_,
-            TranslationStatus::COMMITTED,
-            chunk1,
-            timestamp_ms
-        };
-        callback_(commit1);
+        // Yield the rest of the sentence
+        std::string chunk2 = " para el OnePlus 12. (final)";
 
         TranslationEvent commit2{
             utterance_id,
@@ -101,6 +106,9 @@ public:
             timestamp_ms + 100 // Simulate time progression
         };
         callback_(commit2);
+
+        // Reset state for next utterance
+        has_emitted_early_commit_ = false;
     }
 
 private:
@@ -108,4 +116,5 @@ private:
     TranslationCallback callback_;
     uint32_t sequence_counter_ = 0;
     uint32_t last_provisional_sequence_ = 0;
+    bool has_emitted_early_commit_ = false;
 };
